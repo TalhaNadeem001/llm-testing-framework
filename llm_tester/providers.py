@@ -25,3 +25,29 @@ def call_gemini(messages: list[dict], model: str = "gemini-3-flash-preview", sys
 
     response = client.models.generate_content(model=model, contents=contents, config=config)
     return response.text
+
+
+def call_qwen(messages: list[dict], model: str = "qwen3.5-flash", system_prompt: str = "") -> str:
+    client = OpenAI(
+        api_key=os.environ["DASHSCOPE_API_KEY"],
+        base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    full_messages = []
+    if system_prompt:
+        full_messages.append({"role": "system", "content": system_prompt})
+    full_messages.extend(messages)
+    response = client.chat.completions.create(model=model, messages=full_messages)
+    return response.choices[0].message.content
+
+
+def call_deepseek(messages: list[dict], model: str = "deepseek-v4-flash", system_prompt: str = "") -> str:
+    client = OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url="https://api.deepseek.com",
+    )
+    full_messages = []
+    if system_prompt:
+        full_messages.append({"role": "system", "content": system_prompt})
+    full_messages.extend(messages)
+    response = client.chat.completions.create(model=model, messages=full_messages)
+    return response.choices[0].message.content
