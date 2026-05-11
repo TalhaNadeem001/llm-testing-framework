@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime, timezone
 
+import anthropic
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -143,6 +144,58 @@ def _call_qwen_tools(message: str, model: str, system_prompt: str) -> list[str]:
     return all_called
 
 
+def _build_anthropic_tools() -> list:
+    tools = []
+    for td in TOOL_DEFINITIONS:
+        fn = td["function"]
+        params = fn.get("parameters", {})
+        tools.append({
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "input_schema": {
+                "type": "object",
+                "properties": params.get("properties", {}),
+                "required": params.get("required", []),
+            },
+        })
+    return tools
+
+
+def _call_anthropic_tools(message: str, model: str, system_prompt: str) -> list[str]:
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    stubs = _load_tool_stubs()
+    ant_tools = _build_anthropic_tools()
+    messages = [{"role": "user", "content": message}]
+    all_called = []
+
+    for _ in range(MAX_TURNS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system_prompt,
+            tools=ant_tools,
+            messages=messages,
+        )
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        if not tool_use_blocks:
+            break
+
+        all_called.extend(b.name for b in tool_use_blocks)
+        messages.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for b in tool_use_blocks:
+            result = _execute_tool(stubs, b.name, dict(b.input))
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": b.id,
+                "content": result,
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return all_called
+
+
 def _build_gemini_tools() -> list:
     declarations = []
     for td in TOOL_DEFINITIONS:
@@ -231,6 +284,7 @@ def _write_txt(
     gem_pass: int,
     qwn_pass: int,
     dsk_pass: int,
+    ant_pass: int,
 ) -> None:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
@@ -243,17 +297,19 @@ def _write_txt(
         gem_tick = "✓" if c["gem_ok"] else "✗"
         qwn_tick = "✓" if c["qwn_ok"] else "✗"
         dsk_tick = "✓" if c["dsk_ok"] else "✗"
-        lines.append(f"[{c['id']}]  OAI: {oai_tick}  GEM: {gem_tick}  QWN: {qwn_tick}  DSK: {dsk_tick}")
+        ant_tick = "✓" if c["ant_ok"] else "✗"
+        lines.append(f"[{c['id']}]  OAI: {oai_tick}  GEM: {gem_tick}  QWN: {qwn_tick}  DSK: {dsk_tick}  ANT: {ant_tick}")
         lines.append(f"Message : {c['message']}")
         lines.append(f"Expected: {c['expected_label']}")
         lines.append(f"OpenAI  : {c['oai_result']}")
         lines.append(f"Gemini  : {c['gem_result']}")
         lines.append(f"Qwen    : {c['qwn_result']}")
         lines.append(f"DeepSeek: {c['dsk_result']}")
+        lines.append(f"Anthropic: {c['ant_result']}")
         lines.append("")
     lines += [
         "-" * 52,
-        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.0f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.0f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.0f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.0f}%)",
+        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.0f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.0f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.0f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.0f}%)  |  Anthropic: {ant_pass}/{total} ({ant_pass/total*100:.0f}%)",
     ]
     with open(output_file, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -267,6 +323,7 @@ async def run_execution_batch(
     output_file: str | None = None,
     qwen_model: str = "qwen3.5-flash",
     deepseek_model: str = "deepseek-v4-flash",
+    anthropic_model: str = "claude-haiku-4-5-20251001",
 ) -> None:
     console = Console()
 
@@ -278,15 +335,18 @@ async def run_execution_batch(
     table.add_column("Gemini Called", max_width=30)
     table.add_column("Qwen Called", max_width=30)
     table.add_column("DeepSeek Called", max_width=30)
+    table.add_column("Anthropic Called", max_width=30)
     table.add_column("OAI", justify="center", no_wrap=True)
     table.add_column("GEM", justify="center", no_wrap=True)
     table.add_column("QWN", justify="center", no_wrap=True)
     table.add_column("DSK", justify="center", no_wrap=True)
+    table.add_column("ANT", justify="center", no_wrap=True)
 
     oai_pass = 0
     gem_pass = 0
     qwn_pass = 0
     dsk_pass = 0
+    ant_pass = 0
     plain_rows = []
 
     for case in test_cases:
@@ -294,17 +354,19 @@ async def run_execution_batch(
         message = case.get("message", "")
         expected_tools = case.get("expected_tools", [])
 
-        oai_called, gem_called, qwn_called, dsk_called = await asyncio.gather(
+        oai_called, gem_called, qwn_called, dsk_called, ant_called = await asyncio.gather(
             asyncio.to_thread(_call_openai_tools, message, openai_model, system_prompt),
             asyncio.to_thread(_call_gemini_tools, message, gemini_model, system_prompt),
             asyncio.to_thread(_call_qwen_tools, message, qwen_model, system_prompt),
             asyncio.to_thread(_call_deepseek_tools, message, deepseek_model, system_prompt),
+            asyncio.to_thread(_call_anthropic_tools, message, anthropic_model, system_prompt),
         )
 
         oai_ok = _check(oai_called, expected_tools)
         gem_ok = _check(gem_called, expected_tools)
         qwn_ok = _check(qwn_called, expected_tools)
         dsk_ok = _check(dsk_called, expected_tools)
+        ant_ok = _check(ant_called, expected_tools)
 
         if oai_ok:
             oai_pass += 1
@@ -314,12 +376,15 @@ async def run_execution_batch(
             qwn_pass += 1
         if dsk_ok:
             dsk_pass += 1
+        if ant_ok:
+            ant_pass += 1
 
         expected_label = _fmt_tools(expected_tools)
         oai_result = _fmt_tools(oai_called)
         gem_result = _fmt_tools(gem_called)
         qwn_result = _fmt_tools(qwn_called)
         dsk_result = _fmt_tools(dsk_called)
+        ant_result = _fmt_tools(ant_called)
 
         short_msg = message if len(message) <= 38 else message[:35] + "..."
         table.add_row(
@@ -330,10 +395,12 @@ async def run_execution_batch(
             gem_result,
             qwn_result,
             dsk_result,
+            ant_result,
             "[green]✓[/green]" if oai_ok else "[red]✗[/red]",
             "[green]✓[/green]" if gem_ok else "[red]✗[/red]",
             "[green]✓[/green]" if qwn_ok else "[red]✗[/red]",
             "[green]✓[/green]" if dsk_ok else "[red]✗[/red]",
+            "[green]✓[/green]" if ant_ok else "[red]✗[/red]",
         )
         plain_rows.append({
             "id": case_id,
@@ -347,6 +414,8 @@ async def run_execution_batch(
             "qwn_ok": qwn_ok,
             "dsk_result": dsk_result,
             "dsk_ok": dsk_ok,
+            "ant_result": ant_result,
+            "ant_ok": ant_ok,
         })
 
     total = len(test_cases)
@@ -356,9 +425,10 @@ async def run_execution_batch(
         f"OpenAI: [cyan]{oai_pass}/{total}[/cyan] ({oai_pass/total*100:.0f}%)  |  "
         f"Gemini: [magenta]{gem_pass}/{total}[/magenta] ({gem_pass/total*100:.0f}%)  |  "
         f"Qwen: [yellow]{qwn_pass}/{total}[/yellow] ({qwn_pass/total*100:.0f}%)  |  "
-        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.0f}%)"
+        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.0f}%)  |  "
+        f"Anthropic: [green]{ant_pass}/{total}[/green] ({ant_pass/total*100:.0f}%)"
     )
 
     if output_file:
-        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass)
+        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass, ant_pass)
         console.print(f"Saved results to {output_file}")

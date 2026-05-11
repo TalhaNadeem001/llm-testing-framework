@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-from llm_tester.providers import call_openai, call_gemini, call_qwen, call_deepseek
+from llm_tester.providers import call_openai, call_gemini, call_qwen, call_deepseek, call_anthropic
 
 
 JUDGE_SYSTEM_PROMPT = (
@@ -45,6 +45,10 @@ def _call_composer_qwen(conversation: list[dict], model: str, system_prompt: str
 
 def _call_composer_deepseek(conversation: list[dict], model: str, system_prompt: str) -> str:
     return call_deepseek(conversation, model, system_prompt)
+
+
+def _call_composer_anthropic(conversation: list[dict], model: str, system_prompt: str) -> str:
+    return call_anthropic(conversation, model, system_prompt)
 
 
 def _judge_response(
@@ -111,6 +115,7 @@ def _write_txt(
     gem_pass: int,
     qwn_pass: int,
     dsk_pass: int,
+    ant_pass: int,
 ) -> None:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
@@ -139,10 +144,11 @@ def _write_txt(
 
         # Per-model results
         models = [
-            ("OpenAI",   c["oai_ok"], c.get("oai_response", ""), c.get("oai_criteria", [])),
-            ("Gemini",   c["gem_ok"], c.get("gem_response", ""), c.get("gem_criteria", [])),
-            ("Qwen",     c["qwn_ok"], c.get("qwn_response", ""), c.get("qwn_criteria", [])),
-            ("DeepSeek", c["dsk_ok"], c.get("dsk_response", ""), c.get("dsk_criteria", [])),
+            ("OpenAI",    c["oai_ok"], c.get("oai_response", ""), c.get("oai_criteria", [])),
+            ("Gemini",    c["gem_ok"], c.get("gem_response", ""), c.get("gem_criteria", [])),
+            ("Qwen",      c["qwn_ok"], c.get("qwn_response", ""), c.get("qwn_criteria", [])),
+            ("DeepSeek",  c["dsk_ok"], c.get("dsk_response", ""), c.get("dsk_criteria", [])),
+            ("Anthropic", c["ant_ok"], c.get("ant_response", ""), c.get("ant_criteria", [])),
         ]
         for name, ok, response, criteria in models:
             tick = "✓" if ok else "✗"
@@ -160,7 +166,7 @@ def _write_txt(
 
     lines += [
         "-" * 60,
-        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.1f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.1f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.1f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.1f}%)",
+        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.1f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.1f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.1f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.1f}%)  |  Anthropic: {ant_pass}/{total} ({ant_pass/total*100:.1f}%)",
     ]
     with open(output_file, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -175,6 +181,7 @@ async def run_composer_batch(
     output_file: str | None = None,
     qwen_model: str = "qwen3.5-flash",
     deepseek_model: str = "deepseek-v4-flash",
+    anthropic_model: str = "claude-haiku-4-5-20251001",
 ) -> None:
     console = Console()
 
@@ -185,12 +192,14 @@ async def run_composer_batch(
     table.add_column("GEM", justify="center", no_wrap=True, width=5)
     table.add_column("QWN", justify="center", no_wrap=True, width=5)
     table.add_column("DSK", justify="center", no_wrap=True, width=5)
+    table.add_column("ANT", justify="center", no_wrap=True, width=5)
     table.add_column("Failed Criteria", max_width=50)
 
     oai_pass = 0
     gem_pass = 0
     qwn_pass = 0
     dsk_pass = 0
+    ant_pass = 0
     plain_rows = []
     total = len(test_cases)
 
@@ -205,26 +214,29 @@ async def run_composer_batch(
 
         console.print(f"  [{i}/{total}] {case_id}: {scenario}...", end=" ")
 
-        # Call all four models concurrently
-        oai_response, gem_response, qwn_response, dsk_response = await asyncio.gather(
+        # Call all five models concurrently
+        oai_response, gem_response, qwn_response, dsk_response, ant_response = await asyncio.gather(
             asyncio.to_thread(_call_composer_openai, conversation, openai_model, system_prompt),
             asyncio.to_thread(_call_composer_gemini, conversation, gemini_model, system_prompt),
             asyncio.to_thread(_call_composer_qwen, conversation, qwen_model, system_prompt),
             asyncio.to_thread(_call_composer_deepseek, conversation, deepseek_model, system_prompt),
+            asyncio.to_thread(_call_composer_anthropic, conversation, anthropic_model, system_prompt),
         )
 
-        # Judge all four responses concurrently
-        oai_judgment, gem_judgment, qwn_judgment, dsk_judgment = await asyncio.gather(
+        # Judge all five responses concurrently
+        oai_judgment, gem_judgment, qwn_judgment, dsk_judgment, ant_judgment = await asyncio.gather(
             asyncio.to_thread(_judge_response, scenario, conversation, oai_response, expected_behaviors, judge_model),
             asyncio.to_thread(_judge_response, scenario, conversation, gem_response, expected_behaviors, judge_model),
             asyncio.to_thread(_judge_response, scenario, conversation, qwn_response, expected_behaviors, judge_model),
             asyncio.to_thread(_judge_response, scenario, conversation, dsk_response, expected_behaviors, judge_model),
+            asyncio.to_thread(_judge_response, scenario, conversation, ant_response, expected_behaviors, judge_model),
         )
 
         oai_ok = oai_judgment.get("overall_pass", False)
         gem_ok = gem_judgment.get("overall_pass", False)
         qwn_ok = qwn_judgment.get("overall_pass", False)
         dsk_ok = dsk_judgment.get("overall_pass", False)
+        ant_ok = ant_judgment.get("overall_pass", False)
 
         if oai_ok:
             oai_pass += 1
@@ -234,11 +246,14 @@ async def run_composer_batch(
             qwn_pass += 1
         if dsk_ok:
             dsk_pass += 1
+        if ant_ok:
+            ant_pass += 1
 
         oai_failed = _failed_criteria(oai_judgment)
         gem_failed = _failed_criteria(gem_judgment)
         qwn_failed = _failed_criteria(qwn_judgment)
         dsk_failed = _failed_criteria(dsk_judgment)
+        ant_failed = _failed_criteria(ant_judgment)
 
         # Combine failed criteria for table display
         all_failed = []
@@ -250,6 +265,8 @@ async def run_composer_batch(
             all_failed.append(f"[yellow]QWN:[/yellow] {_fmt_failed(qwn_failed)}")
         if dsk_failed:
             all_failed.append(f"[red]DSK:[/red] {_fmt_failed(dsk_failed)}")
+        if ant_failed:
+            all_failed.append(f"[green]ANT:[/green] {_fmt_failed(ant_failed)}")
         failed_display = "\n".join(all_failed) if all_failed else "[dim]—[/dim]"
 
         flow_short = flow.split(".")[-1].strip() if "." in flow else flow
@@ -262,6 +279,7 @@ async def run_composer_batch(
             "[green]✓[/green]" if gem_ok else "[red]✗[/red]",
             "[green]✓[/green]" if qwn_ok else "[red]✗[/red]",
             "[green]✓[/green]" if dsk_ok else "[red]✗[/red]",
+            "[green]✓[/green]" if ant_ok else "[red]✗[/red]",
             failed_display,
         )
 
@@ -273,23 +291,27 @@ async def run_composer_batch(
             "gem_ok": gem_ok,
             "qwn_ok": qwn_ok,
             "dsk_ok": dsk_ok,
+            "ant_ok": ant_ok,
             "oai_failed": oai_failed,
             "gem_failed": gem_failed,
             "qwn_failed": qwn_failed,
             "dsk_failed": dsk_failed,
+            "ant_failed": ant_failed,
             "conversation": conversation,
             "expected_behaviors": expected_behaviors,
             "oai_response": oai_response,
             "gem_response": gem_response,
             "qwn_response": qwn_response,
             "dsk_response": dsk_response,
+            "ant_response": ant_response,
             "oai_criteria": oai_judgment.get("criteria", []),
             "gem_criteria": gem_judgment.get("criteria", []),
             "qwn_criteria": qwn_judgment.get("criteria", []),
             "dsk_criteria": dsk_judgment.get("criteria", []),
+            "ant_criteria": ant_judgment.get("criteria", []),
         })
 
-        status = f"OAI: {'✓' if oai_ok else '✗'}  GEM: {'✓' if gem_ok else '✗'}  QWN: {'✓' if qwn_ok else '✗'}  DSK: {'✓' if dsk_ok else '✗'}"
+        status = f"OAI: {'✓' if oai_ok else '✗'}  GEM: {'✓' if gem_ok else '✗'}  QWN: {'✓' if qwn_ok else '✗'}  DSK: {'✓' if dsk_ok else '✗'}  ANT: {'✓' if ant_ok else '✗'}"
         console.print(status)
 
     console.print()
@@ -299,9 +321,10 @@ async def run_composer_batch(
         f"OpenAI: [cyan]{oai_pass}/{total}[/cyan] ({oai_pass/total*100:.1f}%)  |  "
         f"Gemini: [magenta]{gem_pass}/{total}[/magenta] ({gem_pass/total*100:.1f}%)  |  "
         f"Qwen: [yellow]{qwn_pass}/{total}[/yellow] ({qwn_pass/total*100:.1f}%)  |  "
-        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.1f}%)"
+        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.1f}%)  |  "
+        f"Anthropic: [green]{ant_pass}/{total}[/green] ({ant_pass/total*100:.1f}%)"
     )
 
     if output_file:
-        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass)
+        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass, ant_pass)
         console.print(f"Saved results to [green]{output_file}[/green]")

@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-from llm_tester.providers import call_openai, call_gemini, call_qwen, call_deepseek
+from llm_tester.providers import call_openai, call_gemini, call_qwen, call_deepseek, call_anthropic
 
 JSON_INSTRUCTION = (
     '\n\nAlways respond with ONLY valid JSON, no extra text:\n'
@@ -61,7 +61,7 @@ def _result_str_plain(parsed: dict | None) -> str:
     return f"{intent} ({conf})"
 
 
-def _write_txt(output_file: str, cases: list[dict], total: int, oai_pass: int, gem_pass: int, qwn_pass: int, dsk_pass: int) -> None:
+def _write_txt(output_file: str, cases: list[dict], total: int, oai_pass: int, gem_pass: int, qwn_pass: int, dsk_pass: int, ant_pass: int) -> None:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
         f"Batch Results — {timestamp}",
@@ -73,7 +73,8 @@ def _write_txt(output_file: str, cases: list[dict], total: int, oai_pass: int, g
         gem_tick = "✓" if c["gem_ok"] else "✗"
         qwn_tick = "✓" if c["qwn_ok"] else "✗"
         dsk_tick = "✓" if c["dsk_ok"] else "✗"
-        lines.append(f"[{c['id']}]  OAI: {oai_tick}  GEM: {gem_tick}  QWN: {qwn_tick}  DSK: {dsk_tick}")
+        ant_tick = "✓" if c["ant_ok"] else "✗"
+        lines.append(f"[{c['id']}]  OAI: {oai_tick}  GEM: {gem_tick}  QWN: {qwn_tick}  DSK: {dsk_tick}  ANT: {ant_tick}")
         lines.append(f"Message : {c['message']}")
         lines.append(f"Expected: {c['expected_label']}")
         lines.append(f"OpenAI  : {c['oai_result']}")
@@ -88,10 +89,13 @@ def _write_txt(output_file: str, cases: list[dict], total: int, oai_pass: int, g
         lines.append(f"DeepSeek: {c['dsk_result']}")
         if c["dsk_reasoning"]:
             lines.append(f"  Reasoning: {c['dsk_reasoning']}")
+        lines.append(f"Anthropic: {c['ant_result']}")
+        if c["ant_reasoning"]:
+            lines.append(f"  Reasoning: {c['ant_reasoning']}")
         lines.append("")
     lines += [
         "-" * 42,
-        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.0f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.0f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.0f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.0f}%)",
+        f"OpenAI: {oai_pass}/{total} ({oai_pass/total*100:.0f}%)  |  Gemini: {gem_pass}/{total} ({gem_pass/total*100:.0f}%)  |  Qwen: {qwn_pass}/{total} ({qwn_pass/total*100:.0f}%)  |  DeepSeek: {dsk_pass}/{total} ({dsk_pass/total*100:.0f}%)  |  Anthropic: {ant_pass}/{total} ({ant_pass/total*100:.0f}%)",
     ]
 
     with open(output_file, "w") as f:
@@ -107,6 +111,7 @@ async def run_batch(
     check_confidence: bool = False,
     output_file: str | None = None,
     deepseek_model: str = "deepseek-v4-flash",
+    anthropic_model: str = "claude-haiku-4-5-20251001",
 ) -> None:
     console = Console()
     augmented_prompt = system_prompt + JSON_INSTRUCTION
@@ -119,15 +124,18 @@ async def run_batch(
     table.add_column("Gemini", no_wrap=True)
     table.add_column("Qwen", no_wrap=True)
     table.add_column("DeepSeek", no_wrap=True)
+    table.add_column("Anthropic", no_wrap=True)
     table.add_column("OAI", justify="center", no_wrap=True)
     table.add_column("GEM", justify="center", no_wrap=True)
     table.add_column("QWN", justify="center", no_wrap=True)
     table.add_column("DSK", justify="center", no_wrap=True)
+    table.add_column("ANT", justify="center", no_wrap=True)
 
     oai_pass = 0
     gem_pass = 0
     qwn_pass = 0
     dsk_pass = 0
+    ant_pass = 0
     plain_rows = []
 
     for case in test_cases:
@@ -137,22 +145,25 @@ async def run_batch(
         expected_confidence = case.get("expected_confidence", "")
         messages = [{"role": "user", "content": message}]
 
-        oai_raw, gem_raw, qwn_raw, dsk_raw = await asyncio.gather(
+        oai_raw, gem_raw, qwn_raw, dsk_raw, ant_raw = await asyncio.gather(
             asyncio.to_thread(call_openai, messages, openai_model, augmented_prompt),
             asyncio.to_thread(call_gemini, messages, gemini_model, augmented_prompt),
             asyncio.to_thread(call_qwen, messages, qwen_model, augmented_prompt),
             asyncio.to_thread(call_deepseek, messages, deepseek_model, augmented_prompt),
+            asyncio.to_thread(call_anthropic, messages, anthropic_model, augmented_prompt),
         )
 
         oai_parsed = _parse_intent_json(oai_raw)
         gem_parsed = _parse_intent_json(gem_raw)
         qwn_parsed = _parse_intent_json(qwn_raw)
         dsk_parsed = _parse_intent_json(dsk_raw)
+        ant_parsed = _parse_intent_json(ant_raw)
 
         oai_ok = _check(oai_parsed, expected_intent, expected_confidence, check_confidence)
         gem_ok = _check(gem_parsed, expected_intent, expected_confidence, check_confidence)
         qwn_ok = _check(qwn_parsed, expected_intent, expected_confidence, check_confidence)
         dsk_ok = _check(dsk_parsed, expected_intent, expected_confidence, check_confidence)
+        ant_ok = _check(ant_parsed, expected_intent, expected_confidence, check_confidence)
 
         if oai_ok:
             oai_pass += 1
@@ -162,6 +173,8 @@ async def run_batch(
             qwn_pass += 1
         if dsk_ok:
             dsk_pass += 1
+        if ant_ok:
+            ant_pass += 1
 
         expected_label = expected_intent
         if check_confidence and expected_confidence:
@@ -176,10 +189,12 @@ async def run_batch(
             _result_str(gem_parsed),
             _result_str(qwn_parsed),
             _result_str(dsk_parsed),
+            _result_str(ant_parsed),
             "[green]✓[/green]" if oai_ok else "[red]✗[/red]",
             "[green]✓[/green]" if gem_ok else "[red]✗[/red]",
             "[green]✓[/green]" if qwn_ok else "[red]✗[/red]",
             "[green]✓[/green]" if dsk_ok else "[red]✗[/red]",
+            "[green]✓[/green]" if ant_ok else "[red]✗[/red]",
         )
         plain_rows.append({
             "id": case_id,
@@ -197,6 +212,9 @@ async def run_batch(
             "dsk_result": _result_str_plain(dsk_parsed),
             "dsk_reasoning": (dsk_parsed or {}).get("reasoning", ""),
             "dsk_ok": dsk_ok,
+            "ant_result": _result_str_plain(ant_parsed),
+            "ant_reasoning": (ant_parsed or {}).get("reasoning", ""),
+            "ant_ok": ant_ok,
         })
 
     total = len(test_cases)
@@ -206,9 +224,10 @@ async def run_batch(
         f"OpenAI: [cyan]{oai_pass}/{total}[/cyan] ({oai_pass/total*100:.0f}%)  |  "
         f"Gemini: [magenta]{gem_pass}/{total}[/magenta] ({gem_pass/total*100:.0f}%)  |  "
         f"Qwen: [yellow]{qwn_pass}/{total}[/yellow] ({qwn_pass/total*100:.0f}%)  |  "
-        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.0f}%)"
+        f"DeepSeek: [blue]{dsk_pass}/{total}[/blue] ({dsk_pass/total*100:.0f}%)  |  "
+        f"Anthropic: [green]{ant_pass}/{total}[/green] ({ant_pass/total*100:.0f}%)"
     )
 
     if output_file:
-        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass)
+        _write_txt(output_file, plain_rows, total, oai_pass, gem_pass, qwn_pass, dsk_pass, ant_pass)
         console.print(f"Saved results to {output_file}")

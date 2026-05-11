@@ -1,4 +1,5 @@
 import os
+import anthropic
 from openai import OpenAI
 from google import genai
 from google.genai import types
@@ -38,6 +39,15 @@ def call_qwen(messages: list[dict], model: str = "qwen3.5-flash", system_prompt:
     full_messages.extend(messages)
     response = client.chat.completions.create(model=model, messages=full_messages)
     return response.choices[0].message.content
+
+
+def call_anthropic(messages: list[dict], model: str = "claude-sonnet-4-6", system_prompt: str = "") -> str:
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    kwargs = {"model": model, "max_tokens": 1024, "messages": messages}
+    if system_prompt:
+        kwargs["system"] = system_prompt
+    response = client.messages.create(**kwargs)
+    return response.content[0].text
 
 
 def call_deepseek(messages: list[dict], model: str = "deepseek-v4-flash", system_prompt: str = "") -> str:
